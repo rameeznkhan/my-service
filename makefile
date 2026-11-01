@@ -39,6 +39,16 @@ dev-down:
 dev-status:
 	watch -n 2 kubectl get pods -o wide --all-namespaces
 
+build: sales metrics auth
+
+sales:
+	docker build \
+		-f zarf/docker/dockerfile.sales \
+		-t $(SALES_IMAGE) \
+		--build-arg BUILD_REF=$(VERSION) \
+		--build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+		.
+
 deps-reset:
 	git checkout -- go.mod
 	go mod tidy
