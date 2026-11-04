@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"expvar"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -11,9 +13,13 @@ import (
 	"time"
 
 	"github.com/ardanlabs/conf/v3"
+
+	"github.com/rameeznkhan/my-service/api/services/api/debug"
+	"github.com/rameeznkhan/my-service/api/services/sales/mux"
 	"github.com/rameeznkhan/my-service/foundation/logger"
 )
 
+var build = "develop"
 var tag = "develop"
 
 func main() {
@@ -41,7 +47,7 @@ func main() {
 }
 
 func run(ctx context.Context, log *logger.Logger) error {
-	log.Info(ctx, "startup", "GOMAXPROCS", runtime.GOMAXPROCS(0))
+	log.Info(ctx, "startup", "GOMAXPROCS", runtime.GOMAXPROCS(0), "build", build)
 
 	cfg := struct {
 		conf.Version
@@ -54,11 +60,33 @@ func run(ctx context.Context, log *logger.Logger) error {
 			DebugHost          string        `conf:"default:0.0.0.0:3010"`
 			CORSAllowedOrigins []string      `conf:"default:*"`
 		}
+		Auth struct {
+			Host      string `conf:"default:http://auth-service:6000"`
+			Mechanism string `conf:"default:http"`
+			GRPC      struct {
+				Host string `conf:"default:auth-service:6001"`
+			}
+		}
+		DB struct {
+			User         string `conf:"default:postgres"`
+			Password     string `conf:"default:postgres,mask"`
+			Host         string `conf:"default:database-service"`
+			Name         string `conf:"default:postgres"`
+			MaxIdleConns int    `conf:"default:0"`
+			MaxOpenConns int    `conf:"default:0"`
+			DisableTLS   bool   `conf:"default:true"`
+		}
+		Tempo struct {
+			Host        string  `conf:"default:tempo:4317"`
+			ServiceName string  `conf:"default:sales"`
+			Probability float64 `conf:"default:0.05"`
+			// Shouldn't use a high Probability value in non-developer systems.
+			// 0.05 should be enough for most systems. Some might want to have
+			// this even lower.
+		}
 	}{
-		Version: conf.Version{
-			Build: tag,
-			Desc:  "Sales",
-		},
+		Build: tag,
+		Desc:  "Sales",
 	}
 
 	const prefix = "SALES"
@@ -73,19 +101,58 @@ func run(ctx context.Context, log *logger.Logger) error {
 
 	log.Info(ctx, "starting service", "version", cfg.Build)
 	defer log.Info(ctx, "shutdown complete")
-
 	out, err := conf.String(&cfg)
 	if err != nil {
-		return fmt.Errorf("generating config for output: %w", err)
+		return fmt.Errorf("generating config for output : %w", err)
 	}
+
 	log.Info(ctx, "startup", "config", out)
+
+	expvar.NewString("build").Set(cfg.Build)
+
+	go func() {
+		log.Info(ctx, "startup", "status", "debug v1 router started", "host", cfg.Web.DebugHost)
+
+		if err := http.ListenAndServe(cfg.Web.DebugHost, debug.Mux()); err != nil {
+			log.Error(ctx, "shutdown", "status", "debug v1 router closed", "host", cfg.Web.DebugHost, "msg", err)
+		}
+	}()
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-shutdown
 
-	log.Info(ctx, "shutdown", "status", "shutdown started", "signal", sig)
-	defer log.Info(ctx, "shutdown", "status", "shutdown complete", "signal", sig)
+	api := http.Server{
+		Addr:         cfg.Web.APIHost,
+		Handler:      mux.WebAPI(),
+		ReadTimeout:  cfg.Web.ReadTimeout,
+		WriteTimeout: cfg.Web.WriteTimeout,
+		IdleTimeout:  cfg.Web.IdleTimeout,
+		ErrorLog:     logger.NewStdLogger(log, logger.LevelError),
+	}
+
+	serverErrors := make(chan error, 1)
+
+	go func() {
+		log.Info(ctx, "startup", "status", "api router started", "host", api.Addr)
+		serverErrors <- api.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErrors:
+		return fmt.Errorf("server error: %w", err)
+
+	case sig := <-shutdown:
+		log.Info(ctx, "shutdown", "status", "shutdown started", "signal", sig)
+		defer log.Info(ctx, "shutdown", "status", "shutdown complete", "signal", sig)
+
+		ctx, cancel := context.WithTimeout(ctx, cfg.Web.ShutdownTimeout)
+		defer cancel()
+
+		if err := api.Shutdown(ctx); err != nil {
+			api.Close()
+			return fmt.Errorf("could not stop server gracefully: %w", err)
+		}
+	}
 
 	return nil
 }

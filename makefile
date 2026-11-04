@@ -45,7 +45,7 @@ dev-down:
 dev-status:
 	watch -n 2 kubectl get pods -o wide --all-namespaces
 
-build: sales metrics auth
+build: sales 
 
 dev-load:
 	kind load docker-image $(SALES_IMAGE) --name $(KIND_CLUSTER)
@@ -57,11 +57,9 @@ dev-apply:
 dev-restart:
 	kubectl rollout restart deployment $(SALES_APP) --namespace=$(NAMESPACE)
 
-dev-update:
-	build dev-load dev-restart
+dev-update: build dev-load dev-restart
 
-dev-update-apply:
-	build dev-load dev-apply
+dev-update-apply: build dev-load dev-apply
 
 dev-logs:
 	kubectl logs --namespace=$(NAMESPACE) -l app=$(SALES_APP) --all-containers=true -f --tail=100 --max-log-requests=6 | go run api/tooling/logfmt/main.go -service=$(SALES_APP)
@@ -72,6 +70,17 @@ dev-describe-deployment:
 
 dev-describe-sales:
 	kubectl describe pod --namespace=$(NAMESPACE) -l app=$(SALES_APP)
+
+curl-tester:
+	curl -il -X GET http://localhost:3000/test
+
+curl-live:
+	curl -il -X GET http://localhost:3000/liveness
+	
+curl-ready:
+	curl -il -X GET http://localhost:3000/readiness
+
+
 
 sales:
 	docker build \
